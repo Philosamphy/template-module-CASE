@@ -1,7 +1,7 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { ApiError } from "../domain/errors.js";
 import type { OperatorDirectory, Permission } from "./operators.js";
-import { hasPermission } from "./operators.js";
+import { hasPermission, isActive } from "./operators.js";
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -30,9 +30,19 @@ export function authenticate(directory: OperatorDirectory): RequestHandler {
       if (!id) {
         throw new ApiError(401, "UNAUTHENTICATED", `Missing ${HEADER} header.`);
       }
-      const operator = await directory.findById(id);
+      // An exact operator id or the email an admin whitelisted.
+      const operator = await directory.resolve(id);
       if (!operator) {
         throw new ApiError(401, "UNAUTHENTICATED", "Unknown operator.");
+      }
+      // Revoked members are not deleted — their history stays — but they can no
+      // longer authenticate. The check is here, once, for every route.
+      if (!isActive(operator)) {
+        throw new ApiError(
+          403,
+          "ACCESS_REVOKED",
+          "This member's access to the workspace has been revoked by an administrator.",
+        );
       }
       req.operator = operator;
       next();

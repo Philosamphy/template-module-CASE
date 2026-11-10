@@ -5,8 +5,13 @@ export const STEP_TYPES = [
   "review",
   "validation",
   "approval",
+  "intake",
   "notification",
+  "document",
 ] as const;
+
+/** File kinds an `intake` step may accept. */
+export const FILE_TYPES = ["pdf", "jpg", "jpeg", "png"] as const;
 export const ORIGINS = ["MANUAL", "AI_DRAFTED"] as const;
 export const REVIEW_STATUSES = ["PENDING", "APPROVED", "REJECTED"] as const;
 
@@ -29,6 +34,19 @@ export const WorkflowStepSchema = z
     assignedRole: z.string().trim().min(1).max(64).optional(),
     /** Optional: notification channel. Checked against SUPPORTED_NOTIFICATION_CHANNELS. */
     channel: z.string().trim().min(1).max(64).optional(),
+    /** Optional: intake only — which file kinds the operator may upload. */
+    acceptedFileTypes: z.array(z.enum(FILE_TYPES)).min(1).max(FILE_TYPES.length).optional(),
+    /** Optional: intake only — what the AI should read from the upload. */
+    instruction: z.string().trim().min(1).max(500).optional(),
+    /**
+     * Optional: where the editor canvas lays this step out. Presentation only —
+     * execution order is the array order. Stored with the template so a dragged
+     * arrangement survives reloads and is shared by everyone who opens it.
+     */
+    position: z
+      .object({ x: z.number().finite(), y: z.number().finite() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -63,10 +81,14 @@ export const UpdateTemplateSchema = z
 
 export type UpdateTemplateInput = z.infer<typeof UpdateTemplateSchema>;
 
-/** POST /api/templates/generate — the operator's natural-language request. */
+/**
+ * POST /api/templates/generate — the operator's natural-language request.
+ * A very short request is accepted but answered with a clarification question,
+ * not a template.
+ */
 export const GenerateTemplateSchema = z
   .object({
-    prompt: z.string().trim().min(10).max(4000),
+    prompt: z.string().trim().min(1).max(4000),
   })
   .strict();
 
@@ -86,6 +108,20 @@ export const GeneratedTemplateSchema = z
   .strict();
 
 export type GeneratedTemplate = z.infer<typeof GeneratedTemplateSchema>;
+
+/**
+ * Generation is a conversation, not a one-shot command: when the request is
+ * too vague to design from, the model asks a focused question instead of
+ * inventing requirements.
+ */
+export const ClarificationSchema = z
+  .object({
+    needsClarification: z.literal(true),
+    question: z.string().trim().min(1).max(600),
+  })
+  .strict();
+
+export type Clarification = z.infer<typeof ClarificationSchema>;
 
 /** POST /api/templates/:id/approve */
 export const ApproveSchema = z
@@ -122,10 +158,24 @@ export const INSTANCE_STATUSES = [
 
 export type InstanceStatus = (typeof INSTANCE_STATUSES)[number];
 
-/** POST /api/instances — start one run of an approved, active template. */
+/**
+ * POST /api/instances — start one run of an approved, active template.
+ *
+ * `input` is the case data the run operates on: document steps render their
+ * output from it. Bounded so an instance cannot become a payload dump.
+ */
 export const StartInstanceSchema = z
   .object({
     templateId: z.string().uuid(),
+    input: z
+      .record(
+        z.string().trim().min(1).max(100),
+        z.string().trim().max(4000),
+      )
+      .refine((value) => Object.keys(value).length <= 50, {
+        message: "At most 50 input fields are allowed.",
+      })
+      .optional(),
   })
   .strict();
 

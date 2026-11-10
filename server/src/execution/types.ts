@@ -19,6 +19,8 @@ export interface WorkflowInstance {
   /** Step the workflow is waiting on while PAUSED. */
   currentStep: string | null;
   cursorIndex: number;
+  /** Case data the run was started with; document steps render from it. */
+  input: Record<string, string>;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -44,6 +46,7 @@ export interface CreateInstanceRecord {
   status: InstanceStatus;
   currentStep: string | null;
   cursorIndex: number;
+  input: Record<string, string>;
   createdBy: string | null;
 }
 
@@ -56,6 +59,49 @@ export interface InstanceFilters {
 export interface ApprovalDecision {
   approved: boolean;
   comments: string | null;
+  by: string;
+}
+
+/**
+ * What a PAUSED run is waiting on — the same shape the graph passes to
+ * interrupt(), surfaced in the instance API so a dashboard can render the
+ * approval card (the CASE platform calls this `pending_approval` / review_data).
+ */
+export interface PendingApproval {
+  kind: "approval";
+  instanceId: string;
+  stepNumber: number;
+  totalSteps: number;
+  step: WorkflowStep;
+}
+
+/**
+ * A run paused at an `intake` step: it will not continue until the operator
+ * uploads one of the accepted files and the server has read it.
+ */
+export interface PendingIntake {
+  kind: "intake";
+  instanceId: string;
+  stepNumber: number;
+  totalSteps: number;
+  step: WorkflowStep;
+  acceptedFileTypes: string[];
+  instruction: string | null;
+}
+
+export type PendingGate = PendingApproval | PendingIntake;
+
+/** What the upload endpoint hands back to the paused graph. */
+export interface IntakeSubmission {
+  kind: "intake";
+  fileName: string;
+  mimeType: string;
+  bytes: number;
+  /** Text read from the file (PDF text layer, or OCR for images). */
+  text: string;
+  /** The model's structured reading of that text, when available. */
+  aiSummary: string | null;
+  extraction: "pdf-text" | "ocr" | "none";
   by: string;
 }
 

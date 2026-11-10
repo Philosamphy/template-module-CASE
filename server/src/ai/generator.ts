@@ -1,6 +1,19 @@
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { ChatOllama } from "@langchain/ollama";
-import { GeneratedTemplateSchema } from "../domain/schemas.js";
+import { z } from "zod";
+import { FILE_TYPES, STEP_TYPES, WorkflowStepSchema } from "../domain/schemas.js";
+
+/**
+ * What the model may answer: either a full template, or a clarifying question
+ * when the request is too thin to design from. `withStructuredOutput` needs a
+ * single object schema, so both shapes share one flat envelope.
+ */
+const GenerationReplySchema = z.object({
+  needsClarification: z.boolean(),
+  question: z.string().max(600).optional(),
+  name: z.string().max(200).optional(),
+  steps: z.array(WorkflowStepSchema).optional(),
+});
 
 /**
  * The generator returns `unknown` on purpose. LangChain/Ollama output is
@@ -20,25 +33,34 @@ export class AiGenerationError extends Error {
 
 const SYSTEM_PROMPT = `You are a workflow template designer for an approval-controlled operations system.
 
-Design a workflow template from the operator's request.
+Your job is to turn the operator's description into a workflow template that matches EXACTLY what they asked for — their case, their checks, their approver, their output document — and nothing more.
 
-Return ONLY an object with exactly these two fields:
-- "name": a short template name (1-200 characters).
-- "steps": an ordered array of 1 to 20 steps. Each step has:
+Return ONLY an object with these fields:
+- "needsClarification": boolean.
+- "question": required when needsClarification is true: ONE focused question (max 600 chars).
+- "name": a short template name (1-200 chars) when you can design the template.
+- "steps": an ordered array of 1 to 20 steps when you can design the template. Each step has:
     - "id": a short unique slug, e.g. "step-1"
     - "name": 1-120 characters
-    - "type": one of "review", "validation", "approval", "notification"
+    - "type": one of ${STEP_TYPES.map((type) => `"${type}"`).join(", ")}
     - "description": 1-1000 characters
-    - "assignedRole" (optional): one of ${("{roles}")}
+    - "assignedRole" (optional): one of {roles}
+    - "channel" (optional, notification only): "email" or "telegram"
+    - "acceptedFileTypes" (optional, intake only): a subset of ${FILE_TYPES.map((type) => `"${type}"`).join(", ")}
+    - "instruction" (optional, intake only): what the AI should read from the uploaded file
+
+ASK FOR CLARIFICATION — do not guess — when the request does not say what the case is, what must be checked or approved, who approves it, or what the outcome/document should be. Do not invent facts, names, systems or documents the operator did not mention.
 
 Hard rules:
 1. The FIRST step must be type "review".
 2. Every "approval" step must come after a "validation" step.
-3. Step ids are unique.
-4. Never include fields for approval status, activation, permissions, or sending anything. You are only proposing a template for a human to review; you cannot approve, activate or notify.
+3. Step ids are unique; never add steps the operator did not ask for.
+4. Use an "intake" step ONLY when the operator says a person must upload a PDF or image for the AI to read before the run can continue. Give it acceptedFileTypes and an instruction describing what to extract.
+5. Use a "document" step only when the workflow produces a letter, report or form.
+6. Never include fields for approval status, activation, permissions or sending anything. You are only proposing a template for a human to review; you cannot approve, activate or notify.
 
-Template steps (examples of style):
-review -> validation -> approval -> notification`;
+Typical shape (only when it matches the request):
+review -> validation -> approval -> intake -> document -> notification`;
 
 export interface OllamaGeneratorOptions {
   baseUrl: string;
@@ -57,6 +79,10 @@ export class OllamaTemplateGenerator implements TemplateGenerator {
       model: options.model,
       baseUrl: options.baseUrl,
       temperature: options.temperature,
+      // Qwen 3.5's default reasoning phase costs ~90s per call on this machine
+      // and buys nothing for structured template design: generation drops from
+      // a >90s timeout to ~14s end-to-end with it off.
+      think: false,
     });
 
     const prompt = ChatPromptTemplate.fromMessages([
@@ -64,7 +90,7 @@ export class OllamaTemplateGenerator implements TemplateGenerator {
       ["human", "{request}"],
     ]);
 
-    const structured = this.llm.withStructuredOutput(GeneratedTemplateSchema, {
+    const structured = this.llm.withStructuredOutput(GenerationReplySchema, {
       name: "workflow_template",
     });
 

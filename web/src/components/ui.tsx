@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { ApiError } from "../api";
-import type { Origin, ReviewStatus } from "../types";
+import type { InstanceStatus, Origin, ReviewStatus } from "../types";
 
 export function Badge({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
@@ -29,6 +29,19 @@ const STATUS_STYLES: Record<ReviewStatus, string> = {
 
 export function StatusBadge({ status }: { status: ReviewStatus }) {
   return <Badge className={STATUS_STYLES[status]}>{status}</Badge>;
+}
+
+const INSTANCE_STYLES: Record<InstanceStatus, string> = {
+  RUNNING: "bg-sky-50 text-sky-700 ring-sky-600/30",
+  PAUSED: "bg-amber-50 text-amber-700 ring-amber-600/30",
+  COMPLETED: "bg-emerald-50 text-emerald-700 ring-emerald-600/30",
+  REJECTED: "bg-rose-50 text-rose-700 ring-rose-600/30",
+  CANCELLED: "bg-slate-100 text-slate-600 ring-slate-400/30",
+};
+
+export function InstanceStatusBadge({ status }: { status: InstanceStatus }) {
+  const label = status === "PAUSED" ? "Waiting for approval" : status;
+  return <Badge className={INSTANCE_STYLES[status]}>{label}</Badge>;
 }
 
 export function ActiveBadge({ active }: { active: boolean }) {

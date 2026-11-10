@@ -1,4 +1,6 @@
 import { Router } from "express";
+import type { AuditRecorder } from "../audit/auditLog.js";
+import { recordAudit } from "../audit/record.js";
 import { authenticate, currentOperator, requirePermission } from "../auth/middleware.js";
 import type { OperatorDirectory } from "../auth/operators.js";
 import { notFound } from "../domain/errors.js";
@@ -16,9 +18,14 @@ import { paramId, parse, wrap } from "./http.js";
 export interface TemplateRouterDeps {
   service: TemplateService;
   operators: OperatorDirectory;
+  audit?: AuditRecorder;
 }
 
-export function createTemplateRouter({ service, operators }: TemplateRouterDeps): Router {
+export function createTemplateRouter({
+  service,
+  operators,
+  audit,
+}: TemplateRouterDeps): Router {
   const router = Router();
 
   // Every route under /api/templates requires an identified operator.
@@ -31,7 +38,19 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
     wrap(async (req, res) => {
       const { prompt } = parse(GenerateTemplateSchema, req.body);
       const operator = currentOperator(req);
-      const template = await service.generate(prompt, operator.id);
+      const outcome = await service.generate(prompt, operator.id);
+      if (outcome.kind === "clarification") {
+        // A question, not a draft: nothing is persisted and no audit row is written.
+        res.status(200).json({ needsClarification: true, question: outcome.question });
+        return;
+      }
+      const template = outcome.template;
+      recordAudit(audit, operator, {
+        action: "TEMPLATE_GENERATED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name, prompt, steps: template.steps.length },
+      });
       res.status(201).json({ template });
     }),
   );
@@ -44,6 +63,12 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
       const input = parse(CreateTemplateSchema, req.body);
       const operator = currentOperator(req);
       const template = await service.createManual(input, operator.id);
+      recordAudit(audit, operator, {
+        action: "TEMPLATE_CREATED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name, steps: template.steps.length },
+      });
       res.status(201).json({ template });
     }),
   );
@@ -77,7 +102,29 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
     wrap(async (req, res) => {
       const patch = parse(UpdateTemplateSchema, req.body);
       const template = await service.update(paramId(req), patch);
+      recordAudit(audit, currentOperator(req), {
+        action: "TEMPLATE_UPDATED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name, steps: template.steps.length, version: template.version },
+      });
       res.json({ template });
+    }),
+  );
+
+  // POST /:id/activate — re-enable a deactivated but still APPROVED template
+  router.post(
+    "/:id/activate",
+    requirePermission("template:deactivate"),
+    wrap(async (req, res) => {
+      const template = await service.activate(paramId(req));
+      recordAudit(audit, currentOperator(req), {
+        action: "TEMPLATE_ACTIVATED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name },
+      });
+      res.json({ template, activated: true });
     }),
   );
 
@@ -87,6 +134,12 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
     requirePermission("template:deactivate"),
     wrap(async (req, res) => {
       const template = await service.deactivate(paramId(req));
+      recordAudit(audit, currentOperator(req), {
+        action: "TEMPLATE_DEACTIVATED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name },
+      });
       res.json({ template, deactivated: true });
     }),
   );
@@ -99,6 +152,12 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
       const { comments } = parse(ApproveSchema, req.body ?? {});
       const operator = currentOperator(req);
       const template = await service.approve(paramId(req), operator.id, comments);
+      recordAudit(audit, operator, {
+        action: "TEMPLATE_APPROVED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name, version: template.version, comments: comments ?? null },
+      });
       res.json({ template });
     }),
   );
@@ -111,6 +170,12 @@ export function createTemplateRouter({ service, operators }: TemplateRouterDeps)
       const { comments } = parse(RejectSchema, req.body ?? {});
       const operator = currentOperator(req);
       const template = await service.reject(paramId(req), operator.id, comments);
+      recordAudit(audit, operator, {
+        action: "TEMPLATE_REJECTED",
+        targetType: "template",
+        targetId: template.templateId,
+        details: { name: template.name, comments },
+      });
       res.json({ template });
     }),
   );

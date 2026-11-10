@@ -12,6 +12,9 @@ interface Props {
   onApprove: (template: Template) => void;
   onDeactivate: (template: Template) => void;
   onRefresh: () => void;
+  /** Mirrors template:approve / template:deactivate — the server enforces both. */
+  canApprove: boolean;
+  canDeactivate: boolean;
 }
 
 export default function TemplateList({
@@ -24,6 +27,8 @@ export default function TemplateList({
   onApprove,
   onDeactivate,
   onRefresh,
+  canApprove,
+  canDeactivate,
 }: Props) {
   const select =
     "rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
@@ -135,7 +140,7 @@ export default function TemplateList({
                     >
                       Open
                     </button>
-                    {template.reviewStatus === "PENDING" && (
+                    {template.reviewStatus === "PENDING" && canApprove && (
                       <button
                         type="button"
                         onClick={() => onApprove(template)}
@@ -144,7 +149,7 @@ export default function TemplateList({
                         Approve
                       </button>
                     )}
-                    {template.isActive && (
+                    {template.isActive && canDeactivate && (
                       <button
                         type="button"
                         onClick={() => onDeactivate(template)}

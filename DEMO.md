@@ -12,7 +12,7 @@ pauses at a human gate → survives a restart → finishes with an audit trail.*
 |---|---|---|
 | API | http://127.0.0.1:8000 | `curl http://127.0.0.1:8000/api/health` → 200 |
 | Web UI | http://localhost:5173 | browser opens the console |
-| Ollama | http://127.0.0.1:11434 | `curl http://127.0.0.1:11434/api/tags` → lists `llama3` |
+| Ollama | http://127.0.0.1:11434 | `curl http://127.0.0.1:11434/api/tags` → lists `qwen3.5:9b` |
 | Postgres | per `server/.env` | API health returns 200 (it checks on boot) |
 
 **Start order if something is down** (Ollama auto-starts with Windows):
@@ -49,7 +49,7 @@ UI → **Generate with AI** → paste:
 > the complaint, checking required details, obtaining approval if needed, and
 > notifying the requester.
 
-→ **Generate draft** (~10 s real Llama 3 call).
+→ **Generate draft** (~14 s real Qwen 3.5 9B call — the CASE platform model).
 
 **Say this:** the model was only asked for `{name, steps}` — it *cannot* express
 origin, status, or activation — and the result is re-validated (Zod + business rules)
@@ -60,10 +60,12 @@ already run this morning.
 
 ## Act 2 — Human approves (1 min)
 
-Switch identity dropdown to **Bagus — Approver** → open the draft → **Approve & activate**.
+Switch identity dropdown to **Bagus — Operator** → open the draft → **Approve & activate**.
 
-*Optional flex:* first click Approve while signed in as **Aiman — Operator** →
-**403 FORBIDDEN**. Permissions are enforced server-side, not by hiding buttons.
+*Optional flex:* first click Approve while signed in as **Chong — Auditor** →
+**403 FORBIDDEN**. Auditors are read-only; permissions are enforced server-side, not by
+hiding buttons. (Operators *can* approve — including the person who created the draft;
+splitting creator and approver is a policy choice, not a code one.)
 
 ## Act 3 — Execution + the restart trick (3 min)
 
@@ -84,7 +86,7 @@ curl -s -H "x-operator-id: ops-operator" \
   http://127.0.0.1:8000/api/instances/f21585f4-6d68-40f8-9789-9c9699c1db2a
 #    → still "status":"PAUSED","currentStep":"step-3"
 
-# 4. Approver opens the gate → COMPLETED
+# 4. A second operator opens the gate → COMPLETED
 curl -s -X POST http://127.0.0.1:8000/api/instances/f21585f4-6d68-40f8-9789-9c9699c1db2a/respond \
   -H "content-type: application/json" -H "x-operator-id: ops-approver" \
   -d '{"approved":true,"comments":"Looks good."}'
@@ -93,13 +95,35 @@ curl -s -X POST http://127.0.0.1:8000/api/instances/f21585f4-6d68-40f8-9789-9c96
 Expected final state: `COMPLETED`, step-3 `APPROVED [ops-approver]`,
 step-4 `SIMULATED` (`delivered: false` — **no real message is ever sent**).
 
+### Bonus beat — a real document gets generated
+
+The `Complaint Reply Letter Workflow` template has a `document` step after the
+approval gate. Start it **with case data** and the run asks qwen3.5:9b to draft
+the letter body (title, sections, optional table), then writes an actual HTML
+letter to `server/output/documents/` (~20 s, model call included):
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/instances \
+  -H "content-type: application/json" -H "x-operator-id: ops-operator" \
+  -d '{"templateId":"62cd3964-8ca8-4983-8ee5-586828afa21e",
+       "input":{"complainant":"Nurul Aisyah","location":"Block C, Level 2",
+                "issue":"Air conditioner leaking"}}'
+
+# answer the gate as an operator, then open the file printed in
+# step-4's result.file — the body is AI-drafted prose (result.contentSource
+# is "ai") built from the input, with the raw case input appended below it.
+```
+
+This is the beat that answers "does it actually execute?": the workflow takes
+data in and produces a file after a human approves.
+
 *If the pre-paused instance gets consumed during rehearsal:* start a fresh one with
 command 1 — it pauses at step-3 immediately.
 
 ## Act 4 — Proof it's real (2 min)
 
 ```bash
-cd template-module && npm test     # 45 tests: schemas, business rules, HTTP lifecycle,
+cd template-module && npm test     # 51 tests: schemas, business rules, HTTP lifecycle,
                                    # permissions, execution graph, rollback
 ```
 
@@ -114,7 +138,8 @@ call) and the `step_runs` table (the audit trail).
 |---|---|
 | Execution engine, pause/resume, restart survival | **Real**, Postgres-persisted |
 | Authorization (403s), audit trail, transactions | **Real**, enforced server-side |
-| AI generation via Ollama/Llama 3 | **Real**, ~10 s, re-validated as untrusted input |
+| AI generation via Ollama/Qwen 3.5 (CASE model) | **Real**, ~14 s, re-validated as untrusted input |
+| `document` step | **Real** — qwen3.5:9b drafts the document body (title/sections/table) from the instance input and the run writes an HTML file to `server/output/documents/`; falls back to plain input rendering if the model is down |
 | `review` / `validation` step handlers | **Placeholder logic** — they record a run but don't inspect content yet (planned: require a human) |
 | `notification` step | **Simulated by design** — real adapter is a follow-up |
 | Operator identity | **`x-operator-id` header**, not real sign-in yet |

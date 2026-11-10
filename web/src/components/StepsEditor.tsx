@@ -1,6 +1,6 @@
 import type { StepType, WorkflowStep } from "../types";
 
-const STEP_TYPES: StepType[] = ["review", "validation", "approval", "notification"];
+const STEP_TYPES: StepType[] = ["review", "validation", "approval", "document", "notification"];
 
 interface Props {
   steps: WorkflowStep[];

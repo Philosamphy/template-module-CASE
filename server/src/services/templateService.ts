@@ -2,6 +2,7 @@ import { AiGenerationError, type TemplateGenerator } from "../ai/generator.js";
 import { validateBusinessRules, type RuleConfig } from "../domain/businessRules.js";
 import { conflict, notFound, unprocessable, upstream } from "../domain/errors.js";
 import {
+  ClarificationSchema,
   CreateTemplateSchema,
   GeneratedTemplateSchema,
   formatIssues,
@@ -17,6 +18,17 @@ export interface GeneratedTemplate extends TemplateWithStatus {
   /** Full review history, returned when a single template is fetched. */
   reviews: Review[];
 }
+
+/**
+ * Generation answers either with a saved draft or with a question. A vague
+ * request is never padded into a template the operator did not ask for.
+ */
+export type GenerateOutcome =
+  | { kind: "clarification"; question: string }
+  | { kind: "template"; template: TemplateWithStatus };
+
+const CLARIFY_QUESTION =
+  "Could you describe the case this workflow handles, what must be checked or approved (and by whom), and what document or message should come out of it? If a person must upload a PDF or image for the AI to read, say so too.";
 
 /**
  * Business logic for the template lifecycle:
@@ -77,7 +89,12 @@ export class TemplateService {
   }
 
   /** POST /api/templates/generate — AI drafts are saved inactive, always PENDING. */
-  async generate(request: string, actorId: string): Promise<TemplateWithStatus> {
+  async generate(request: string, actorId: string): Promise<GenerateOutcome> {
+    // Too little to design from: ask the operator instead of inventing details.
+    if (request.trim().length < 20) {
+      return { kind: "clarification", question: CLARIFY_QUESTION };
+    }
+
     let raw: unknown;
     try {
       raw = await this.generator.generate(request);
@@ -88,8 +105,27 @@ export class TemplateService {
       throw error;
     }
 
+    // The model may ask a question instead of proposing a template. Only an
+    // explicit { needsClarification: true, question } is accepted as such; the
+    // flat envelope is stripped before the template itself is validated.
+    let candidate: unknown = raw;
+    if (raw !== null && typeof raw === "object" && "needsClarification" in raw) {
+      const envelope = raw as { needsClarification?: unknown; name?: unknown; steps?: unknown };
+      if (envelope.needsClarification === true) {
+        const clarification = ClarificationSchema.safeParse(raw);
+        if (!clarification.success) {
+          throw unprocessable("The AI response did not match the required template structure.", {
+            structural: formatIssues(clarification.error),
+            businessRules: [],
+          });
+        }
+        return { kind: "clarification", question: clarification.data.question };
+      }
+      candidate = { name: envelope.name, steps: envelope.steps };
+    }
+
     // Untrusted model output: validate structure, then business rules.
-    const parsed = GeneratedTemplateSchema.safeParse(raw);
+    const parsed = GeneratedTemplateSchema.safeParse(candidate);
     if (!parsed.success) {
       throw unprocessable("The AI response did not match the required template structure.", {
         structural: formatIssues(parsed.error),
@@ -98,7 +134,7 @@ export class TemplateService {
     }
     this.assertValid(parsed.data);
 
-    return this.repo.create(
+    const template = await this.repo.create(
       {
         name: parsed.data.name,
         version: 1,
@@ -109,6 +145,7 @@ export class TemplateService {
       },
       { status: "PENDING", reviewedBy: null, comments: "AI draft awaiting operator review." },
     );
+    return { kind: "template", template };
   }
 
   /** GET /api/templates */
@@ -164,6 +201,26 @@ export class TemplateService {
       }
     });
 
+    const updated = await this.repo.getById(id);
+    if (!updated) throw notFound(`Template ${id} not found.`);
+    return updated;
+  }
+
+  /**
+   * POST /api/templates/:id/activate — brings a previously deactivated, still
+   * APPROVED template back into service. A PENDING/REJECTED draft must go
+   * through review instead; activation never implies approval.
+   */
+  async activate(id: string): Promise<TemplateWithStatus> {
+    const template = await this.repo.getById(id);
+    if (!template) throw notFound(`Template ${id} not found.`);
+    if (template.reviewStatus !== "APPROVED") {
+      throw conflict(
+        "Only approved templates can be activated. Approve this template first.",
+        { reviewStatus: template.reviewStatus, templateId: id },
+      );
+    }
+    await this.repo.setActive(id, true);
     const updated = await this.repo.getById(id);
     if (!updated) throw notFound(`Template ${id} not found.`);
     return updated;

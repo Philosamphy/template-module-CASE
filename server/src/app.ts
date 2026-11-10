@@ -1,12 +1,18 @@
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import type { BaseCheckpointSaver } from "@langchain/langgraph";
-import type { OperatorDirectory } from "./auth/operators.js";
+import type { AuditRecorder, AuditStore } from "./audit/auditLog.js";
+import { silentAudit } from "./audit/auditLog.js";
+import type { OperatorStore } from "./auth/operators.js";
 import type { TemplateGenerator } from "./ai/generator.js";
 import type { RuleConfig } from "./domain/businessRules.js";
+import type { DocumentPort } from "./execution/documents.js";
+import type { FileReader } from "./execution/intake.js";
 import type { NotificationPort } from "./execution/notifier.js";
 import { ApiError } from "./domain/errors.js";
+import { createAuditRouter } from "./routes/audit.js";
 import { createInstanceRouter } from "./routes/instances.js";
+import { createOperatorRouter } from "./routes/operators.js";
 import { createTemplateRouter } from "./routes/templates.js";
 import type { TemplateRepository } from "./repo/types.js";
 import type { ExecutionRepository } from "./execution/types.js";
@@ -18,33 +24,67 @@ export interface AppDependencies {
   executions: ExecutionRepository;
   checkpointer: BaseCheckpointSaver;
   notifier: NotificationPort;
-  operators: OperatorDirectory;
+  documents: DocumentPort;
+  operators: OperatorStore;
   generator: TemplateGenerator;
   rules: RuleConfig;
   corsOrigins: string[];
+  /** Output directory of `document` steps; also the containment root when serving files. */
+  documentOutputDir?: string;
+  /** Hash-chained audit trail. Omitted in tests, where recording is a no-op. */
+  audit?: AuditStore;
+  /** Reads uploaded intake files. Omitted in tests (uploads are refused). */
+  files?: FileReader;
 }
 
 export function createApp(deps: AppDependencies): Express {
   const app = express();
 
   app.disable("x-powered-by");
-  app.use(cors({ origin: deps.corsOrigins, methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"] }));
+  app.use(
+    cors({
+      origin: deps.corsOrigins,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    }),
+  );
   app.use(express.json({ limit: "128kb" }));
 
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok" });
   });
 
+  const audit: AuditRecorder = deps.audit ?? silentAudit;
+
   const service = new TemplateService(deps.repo, deps.generator, deps.rules);
-  app.use("/api/templates", createTemplateRouter({ service, operators: deps.operators }));
+  app.use(
+    "/api/templates",
+    createTemplateRouter({ service, operators: deps.operators, audit }),
+  );
+  app.use(
+    "/api/operators",
+    createOperatorRouter({ store: deps.operators, audit }),
+  );
+  if (deps.audit) {
+    app.use("/api/audit", createAuditRouter({ store: deps.audit, operators: deps.operators }));
+  }
 
   const instances = new InstanceService({
     templates: deps.repo,
     instances: deps.executions,
     checkpointer: deps.checkpointer,
     notifier: deps.notifier,
+    documents: deps.documents,
+    documentOutputDir: deps.documentOutputDir,
   });
-  app.use("/api/instances", createInstanceRouter({ service: instances, operators: deps.operators }));
+  app.use(
+    "/api/instances",
+    createInstanceRouter({
+      service: instances,
+      operators: deps.operators,
+      audit,
+      files: deps.files,
+    }),
+  );
 
   app.use((_req, _res, next) => next(new ApiError(404, "NOT_FOUND", "Route not found.")));
 

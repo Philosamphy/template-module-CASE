@@ -1,10 +1,14 @@
 import { OllamaTemplateGenerator } from "./ai/generator.js";
+import { PostgresAuditLog } from "./audit/auditLog.js";
+import { OllamaDocumentContentGenerator } from "./ai/documentContent.js";
+import { OllamaFileReader } from "./ai/fileReader.js";
 import { PostgresOperatorDirectory } from "./auth/operators.js";
 import { createApp } from "./app.js";
 import { config } from "./config.js";
 import { createPool } from "./db/pool.js";
 import { migrate } from "./db/migrate.js";
 import { SimulatedNotificationPort } from "./execution/notifier.js";
+import { HtmlFileDocumentGenerator } from "./execution/documents.js";
 import { PostgresExecutionRepository } from "./repo/pgExecutionRepo.js";
 import { PostgresTemplateRepository } from "./repo/pgRepo.js";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -32,6 +36,17 @@ async function main(): Promise<void> {
     executions: new PostgresExecutionRepository(pool),
     checkpointer,
     notifier: new SimulatedNotificationPort(),
+    documents: new HtmlFileDocumentGenerator(
+      config.documentOutputDir,
+      // AI drafts the document body during execution (CASE document-designer
+      // prompt); on any model failure the port falls back to input rendering.
+      new OllamaDocumentContentGenerator({
+        baseUrl: config.ollama.baseUrl,
+        model: config.ollama.model,
+        temperature: config.ollama.temperature,
+        timeoutMs: config.ollama.timeoutMs,
+      }),
+    ),
     operators: new PostgresOperatorDirectory(pool),
     generator: new OllamaTemplateGenerator({
       baseUrl: config.ollama.baseUrl,
@@ -42,6 +57,14 @@ async function main(): Promise<void> {
     }),
     rules: config.rules,
     corsOrigins: config.corsOrigins,
+    documentOutputDir: config.documentOutputDir,
+    audit: new PostgresAuditLog(pool),
+    files: new OllamaFileReader({
+      baseUrl: config.ollama.baseUrl,
+      model: config.ollama.model,
+      temperature: config.ollama.temperature,
+      timeoutMs: config.ollama.timeoutMs,
+    }),
   });
 
   app.listen(config.port, () => {

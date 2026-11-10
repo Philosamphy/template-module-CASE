@@ -6,10 +6,16 @@ import { MemorySaver } from "@langchain/langgraph";
 import { AiGenerationError, type TemplateGenerator } from "../src/ai/generator.js";
 import { createApp } from "../src/app.js";
 import type { RuleConfig } from "../src/domain/businessRules.js";
+import { NullDocumentPort } from "../src/execution/documents.js";
 import { SimulatedNotificationPort } from "../src/execution/notifier.js";
 import { MemoryExecutionRepository } from "./support/memoryExecutionRepo.js";
 import { MemoryTemplateRepository } from "./support/memoryRepo.js";
-import { APPROVER_ID, OPERATOR_ID, testOperatorDirectory } from "./support/operators.js";
+import {
+  AUDITOR_ID,
+  OPERATOR_ID,
+  REVIEWER_ID,
+  testOperatorDirectory,
+} from "./support/operators.js";
 
 const rules: RuleConfig = {
   maxSteps: 20,
@@ -36,7 +42,7 @@ const validSteps = () => [
 ];
 
 class StubGenerator implements TemplateGenerator {
-  mode: "ok" | "invalid-ai-output" | "unavailable" = "ok";
+  mode: "ok" | "envelope" | "invalid-ai-output" | "unavailable" = "ok";
 
   async generate(): Promise<unknown> {
     if (this.mode === "unavailable") {
@@ -45,6 +51,16 @@ class StubGenerator implements TemplateGenerator {
     if (this.mode === "invalid-ai-output") {
       // A model that both breaks the schema and tries to grant itself approval.
       return { name: "", steps: "not-an-array", is_active: true, review_status: "APPROVED" };
+    }
+    if (this.mode === "envelope") {
+      // The real model answers in the flat clarification envelope even when it
+      // is proposing a template, so the envelope must not break validation.
+      return {
+        needsClarification: false,
+        question: null,
+        name: "AI Maintenance Complaint Workflow",
+        steps: validSteps(),
+      };
     }
     return { name: "AI Maintenance Complaint Workflow", steps: validSteps() };
   }
@@ -61,6 +77,7 @@ beforeAll(async () => {
     executions: new MemoryExecutionRepository(),
     checkpointer: new MemorySaver(),
     notifier: new SimulatedNotificationPort(),
+    documents: new NullDocumentPort(),
     operators: testOperatorDirectory(),
     generator,
     rules,
@@ -123,12 +140,12 @@ describe("authentication and authorisation", () => {
     expect(response.status).toBe(401);
   });
 
-  it("forbids a non-approver from approving, even with a valid identity", async () => {
+  it("forbids an auditor from approving, even with a valid identity", async () => {
     const template = await createTemplate();
     const response = await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: OPERATOR_ID,
+      operator: AUDITOR_ID,
     });
     expect(response.status).toBe(403);
     expect(response.body.error.code).toBe("FORBIDDEN");
@@ -180,6 +197,18 @@ describe("POST /api/templates/generate", () => {
     expect(response.body.template.origin).toBe("AI_DRAFTED");
     expect(response.body.template.isActive).toBe(false);
     expect(response.body.template.reviewStatus).toBe("PENDING");
+  });
+
+  it("accepts a template wrapped in the clarification envelope", async () => {
+    generator.mode = "envelope";
+    const response = await api("/api/templates/generate", {
+      method: "POST",
+      body: { prompt: "Create a workflow for a maintenance complaint submitted in Malay." },
+    });
+    expect(response.status).toBe(201);
+    expect(response.body.template.name).toBe("AI Maintenance Complaint Workflow");
+    expect(response.body.template.steps).toHaveLength(validSteps().length);
+    generator.mode = "ok";
   });
 
   it("treats model output as untrusted and refuses to persist invalid JSON", async () => {
@@ -238,7 +267,7 @@ describe("PUT /api/templates/:id (editing)", () => {
     await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     const response = await api(`/api/templates/${template.templateId}`, {
       method: "PUT",
@@ -260,12 +289,12 @@ describe("approve / reject lifecycle", () => {
     const response = await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: { comments: "Checked against the maintenance policy." },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(response.status).toBe(200);
     expect(response.body.template.reviewStatus).toBe("APPROVED");
     expect(response.body.template.isActive).toBe(true);
-    expect(response.body.template.reviewedBy).toBe(APPROVER_ID);
+    expect(response.body.template.reviewedBy).toBe(REVIEWER_ID);
 
     const detail = await api(`/api/templates/${template.templateId}`);
     expect(detail.body.template.reviews.map((r: any) => r.status)).toEqual(["APPROVED", "PENDING"]);
@@ -276,13 +305,13 @@ describe("approve / reject lifecycle", () => {
     const first = await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(first.status).toBe(200);
     const second = await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(second.status).toBe(409);
     expect(second.body.error.details.reviewStatus).toBe("APPROVED");
@@ -294,14 +323,14 @@ describe("approve / reject lifecycle", () => {
     const noReason = await api(`/api/templates/${template.templateId}/reject`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(noReason.status).toBe(422);
 
     const response = await api(`/api/templates/${template.templateId}/reject`, {
       method: "POST",
       body: { comments: "Missing escalation step." },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(response.status).toBe(200);
     expect(response.body.template.reviewStatus).toBe("REJECTED");
@@ -313,7 +342,7 @@ describe("approve / reject lifecycle", () => {
     await api(`/api/templates/${template.templateId}/reject`, {
       method: "POST",
       body: { comments: "Missing escalation step." },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
 
     const edited = await api(`/api/templates/${template.templateId}`, {
@@ -326,7 +355,7 @@ describe("approve / reject lifecycle", () => {
     const approved = await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(approved.status).toBe(200);
     expect(approved.body.template.isActive).toBe(true);
@@ -361,7 +390,7 @@ describe("listing, retrieval and deactivation", () => {
     await api(`/api/templates/${template.templateId}/approve`, {
       method: "POST",
       body: {},
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
 
     const response = await api(`/api/templates/${template.templateId}`, { method: "DELETE" });

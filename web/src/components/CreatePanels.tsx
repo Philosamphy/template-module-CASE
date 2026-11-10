@@ -76,7 +76,7 @@ export function NewTemplate({ onCreated }: { onCreated: (template: Template) => 
           {saving ? "Saving…" : "Create template"}
         </button>
         <p className="text-xs text-slate-500">
-          New templates start as <strong>PENDING</strong> and <strong>inactive</strong> until an approver signs off.
+          New templates start as <strong>PENDING</strong> and <strong>inactive</strong> until an operator or admin approves them.
         </p>
       </div>
     </form>

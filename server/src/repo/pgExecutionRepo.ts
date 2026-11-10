@@ -19,6 +19,7 @@ interface InstanceRow {
   status: InstanceStatus;
   current_step: string | null;
   cursor_index: number;
+  input: Record<string, string>;
   created_by: string | null;
   created_at: Date;
   updated_at: Date;
@@ -37,7 +38,7 @@ interface StepRunRow {
 }
 
 const INSTANCE_COLUMNS = `instance_id, template_id, template_name, template_version, steps,
-  status, current_step, cursor_index, created_by, created_at, updated_at`;
+  status, current_step, cursor_index, input, created_by, created_at, updated_at`;
 
 function toInstance(row: InstanceRow): WorkflowInstance {
   return {
@@ -49,6 +50,7 @@ function toInstance(row: InstanceRow): WorkflowInstance {
     status: row.status,
     currentStep: row.current_step,
     cursorIndex: row.cursor_index,
+    input: row.input ?? {},
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -76,8 +78,8 @@ export class PostgresExecutionRepository implements ExecutionRepository {
   async create(record: CreateInstanceRecord): Promise<WorkflowInstance> {
     const result = await this.pool.query<InstanceRow>(
       `INSERT INTO workflow_instances
-         (template_id, template_name, template_version, steps, status, current_step, cursor_index, created_by)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+         (template_id, template_name, template_version, steps, status, current_step, cursor_index, input, created_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9)
        RETURNING ${INSTANCE_COLUMNS}`,
       [
         record.templateId,
@@ -87,6 +89,7 @@ export class PostgresExecutionRepository implements ExecutionRepository {
         record.status,
         record.currentStep,
         record.cursorIndex,
+        JSON.stringify(record.input ?? {}),
         record.createdBy,
       ],
     );

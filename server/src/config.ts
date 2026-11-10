@@ -13,23 +13,36 @@ function bool(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
+ * A usable TCP port. dotenv never overrides a variable that is already set, so a
+ * stray `PORT=0` in the surrounding shell would otherwise make the API bind a
+ * random port while the web app keeps calling :8000.
+ */
+function port(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
+}
+
+/**
  * Central runtime configuration. Credentials are read from the environment only —
  * never hard-coded in source.
  */
 export const config = {
-  port: Number(process.env.PORT ?? 8000),
+  port: port(process.env.PORT, 8000),
   databaseUrl:
     process.env.DATABASE_URL ??
     "postgresql://postgres:postgres@127.0.0.1:5432/template_module",
   autoMigrate: bool(process.env.AUTO_MIGRATE, true),
+  /** Where `document` steps write their generated files. */
+  documentOutputDir:
+    process.env.DOCUMENT_OUTPUT_DIR ?? "output/documents",
   corsOrigins: csv(process.env.CORS_ORIGINS, "http://localhost:5173"),
   ollama: {
     baseUrl:
       process.env.OLLAMA_BASE_URL ??
       process.env.OLLAMA_HOST ??
       "http://127.0.0.1:11434",
-    model: process.env.OLLAMA_MODEL ?? "llama3",
-    temperature: Number(process.env.OLLAMA_TEMPERATURE ?? "0"),
+    model: process.env.OLLAMA_MODEL ?? "qwen3.5:9b",
+    temperature: Number(process.env.OLLAMA_TEMPERATURE ?? "0.1"),
     timeoutMs: Number(process.env.OLLAMA_TIMEOUT_MS ?? "90000"),
   },
   rules: {

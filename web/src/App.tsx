@@ -3,22 +3,47 @@ import {
   OPERATORS,
   approveTemplate,
   deactivateTemplate,
+  getMe,
   getOperatorId,
   getTemplate,
+  listMembers,
   listTemplates,
   setOperatorId,
   type ListFilters,
 } from "./api";
 import { GeneratePanel, NewTemplate } from "./components/CreatePanels";
+import Members from "./components/Members";
+import RunDetail from "./components/RunDetail";
+import RunsView from "./components/RunsView";
 import TemplateDetail from "./components/TemplateDetail";
 import TemplateList from "./components/TemplateList";
-import type { Template } from "./types";
+import type { Me, Member, Template } from "./types";
 
 type View =
   | { kind: "list" }
   | { kind: "create" }
   | { kind: "generate" }
-  | { kind: "detail"; id: string };
+  | { kind: "detail"; id: string }
+  | { kind: "runs" }
+  | { kind: "run"; id: string }
+  | { kind: "members" };
+
+/** Nav targets are always payload-free views ("detail"/"run" need an id). */
+type NavKind = Exclude<View["kind"], "detail" | "run">;
+
+interface NavItem {
+  kind: NavKind;
+  label: string;
+  permission?: string;
+}
+
+const NAV: NavItem[] = [
+  { kind: "list", label: "Templates" },
+  { kind: "create", label: "New manual template", permission: "template:create" },
+  { kind: "generate", label: "Generate with AI", permission: "template:generate" },
+  { kind: "runs", label: "Runs" },
+  { kind: "members", label: "Members", permission: "users:manage" },
+];
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: "list" });
@@ -28,12 +53,42 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
+  const [members, setMembers] = useState<Member[]>(OPERATORS);
   const [operator, setOperator] = useState(getOperatorId());
   const [reload, setReload] = useState(0);
 
-  const isApprover = operator === "ops-approver";
-
   const refresh = useCallback(() => setReload((value) => value + 1), []);
+
+  /** Permission check for *display only* — the server re-checks every action. */
+  const can = useCallback(
+    (permission: string) => me?.permissions.includes(permission) ?? false,
+    [me],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((result) => {
+        if (!cancelled) setMe(result);
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [operator, reload]);
+
+  const loadMembers = useCallback(() => {
+    listMembers()
+      .then(setMembers)
+      .catch(() => setMembers(OPERATORS));
+  }, []);
+
+  useEffect(() => {
+    loadMembers();
+  }, [loadMembers, operator, reload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,15 +128,54 @@ export default function App() {
     };
   }, [view, reload]);
 
+  // Switching identity can remove access to the current view (e.g. an auditor
+  // opened Members). Fall back to the list rather than showing dead controls.
+  useEffect(() => {
+    if (!me) return;
+    const allowed: Record<View["kind"], boolean> = {
+      list: true,
+      create: can("template:create"),
+      generate: can("template:generate"),
+      detail: true,
+      runs: true,
+      run: true,
+      members: can("users:manage"),
+    };
+    if (!allowed[view.kind]) setView({ kind: "list" });
+  }, [me, view.kind, can]);
+
   const navItems = useMemo(
-    () =>
-      [
-        { kind: "list" as const, label: "Templates" },
-        { kind: "create" as const, label: "New manual template" },
-        { kind: "generate" as const, label: "Generate with AI" },
-      ],
-    [],
+    () => NAV.filter((item) => !item.permission || can(item.permission)),
+    [can],
   );
+
+  // Only members with access can be "signed in as"; revoked ones stay visible in
+  // the Members screen but must not be selectable identities.
+  const identityOptions = useMemo(() => {
+    const active = (members.length > 0 ? members : OPERATORS).filter(
+      (member) => member.revokedAt === null,
+    );
+    const list = active.length > 0 ? active : OPERATORS;
+    if (list.some((member) => member.id === operator)) return list;
+    return [
+      {
+        id: operator,
+        displayName: `${operator} — access removed`,
+        email: "",
+        role: me?.operator.role ?? ("operator" as const),
+        revokedAt: new Date().toISOString(),
+      },
+      ...list,
+    ];
+  }, [members, operator, me]);
+
+  const switchOperator = (id: string) => {
+    setOperator(id);
+    setOperatorId(id);
+    setNotice(null);
+    setError(null);
+    setView({ kind: "list" });
+  };
 
   const openTemplate = (id: string) => {
     setNotice(null);
@@ -137,22 +231,19 @@ export default function App() {
           Signed in as
           <select
             value={operator}
-            onChange={(event) => {
-              setOperator(event.target.value);
-              setOperatorId(event.target.value);
-            }}
+            onChange={(event) => switchOperator(event.target.value)}
             className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
           >
-            {OPERATORS.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
+            {identityOptions.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.displayName} — {member.role}
               </option>
             ))}
           </select>
         </label>
       </header>
 
-      <nav className="mb-5 flex gap-1 border-b border-slate-200">
+      <nav className="mb-5 flex flex-wrap gap-1 border-b border-slate-200">
         {navItems.map((item) => (
           <button
             key={item.kind}
@@ -193,6 +284,8 @@ export default function App() {
             onApprove={handleApprove}
             onDeactivate={handleDeactivate}
             onRefresh={refresh}
+            canApprove={can("template:approve")}
+            canDeactivate={can("template:deactivate")}
           />
         )}
 
@@ -204,7 +297,9 @@ export default function App() {
           <TemplateDetail
             key={detail.templateId}
             template={detail}
-            isApprover={isApprover}
+            canEdit={can("template:edit")}
+            canApprove={can("template:approve")}
+            canDeactivate={can("template:deactivate")}
             onUpdated={handleUpdated}
             onDeactivated={(updated) => {
               setDetail(updated);
@@ -218,11 +313,44 @@ export default function App() {
         {view.kind === "detail" && !detail && !error && (
           <p className="text-sm text-slate-500">Loading template…</p>
         )}
+
+        {view.kind === "runs" && (
+          <RunsView
+            canStart={can("workflow:start")}
+            onOpen={(id) => {
+              setNotice(null);
+              setView({ kind: "run", id });
+            }}
+            onNotice={setNotice}
+          />
+        )}
+
+        {view.kind === "run" && (
+          <RunDetail
+            key={view.id}
+            instanceId={view.id}
+            canRespond={can("workflow:respond")}
+            canCancel={can("workflow:cancel")}
+            onNotice={setNotice}
+            onBack={() => setView({ kind: "runs" })}
+          />
+        )}
+
+        {view.kind === "members" && (
+          <Members
+            members={members}
+            currentId={operator}
+            onChanged={() => {
+              loadMembers();
+              refresh();
+            }}
+          />
+        )}
       </main>
 
       <footer className="mt-8 border-t border-slate-200 pt-4 text-xs text-slate-400">
-        Approvals, rejections, edits and deactivation are enforced server-side; the UI only
-        reflects the caller's permissions.
+        Roles are enforced server-side: admins manage members, operators create/approve/run,
+        auditors read only. The UI only mirrors the caller's permissions.
       </footer>
     </div>
   );

@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS operators (
   operator_id   TEXT PRIMARY KEY,
   display_name  TEXT NOT NULL CHECK (display_name <> ''),
-  role          TEXT NOT NULL CHECK (role IN ('operator', 'approver')),
+  role          TEXT NOT NULL CHECK (role IN ('admin', 'operator', 'auditor')),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -41,7 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_template_reviews_template
   ON template_reviews (template_id, created_at DESC);
 
 -- Seed development operators. Replace with your own identity provider mapping.
+-- admin: everything an operator can do, plus member management.
+-- operator: create/edit/approve templates and run workflows.
+-- auditor: read-only over templates, runs and documents.
 INSERT INTO operators (operator_id, display_name, role) VALUES
+  ('ops-admin', 'Aisyah (Admin)', 'admin'),
   ('ops-operator', 'Aiman (Operator)', 'operator'),
-  ('ops-approver', 'Bagus (Approver)', 'approver')
+  ('ops-auditor', 'Chong (Auditor)', 'auditor')
 ON CONFLICT (operator_id) DO NOTHING;

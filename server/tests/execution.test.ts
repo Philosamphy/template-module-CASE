@@ -1,3 +1,6 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { MemorySaver } from "@langchain/langgraph";
@@ -5,13 +8,19 @@ import type { Express } from "express";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import type { RuleConfig } from "../src/domain/businessRules.js";
+import { HtmlFileDocumentGenerator } from "../src/execution/documents.js";
 import { SimulatedNotificationPort } from "../src/execution/notifier.js";
 import type { WorkflowInstance } from "../src/execution/types.js";
 import { InstanceService } from "../src/services/instanceService.js";
 import type { TemplateRepository } from "../src/repo/types.js";
 import { MemoryExecutionRepository } from "./support/memoryExecutionRepo.js";
 import { MemoryTemplateRepository } from "./support/memoryRepo.js";
-import { APPROVER_ID, OPERATOR_ID, testOperatorDirectory } from "./support/operators.js";
+import {
+  AUDITOR_ID,
+  OPERATOR_ID,
+  REVIEWER_ID,
+  testOperatorDirectory,
+} from "./support/operators.js";
 
 const rules: RuleConfig = {
   maxSteps: 20,
@@ -41,6 +50,8 @@ let notifier: SimulatedNotificationPort;
 let checkpointer: MemorySaver;
 let approvedTemplateId: string;
 let pendingTemplateId: string;
+let documentTemplateId: string;
+let docOutputDir: string;
 
 beforeAll(async () => {
   templates = new MemoryTemplateRepository();
@@ -58,7 +69,7 @@ beforeAll(async () => {
         isActive: true,
         createdBy: OPERATOR_ID,
       },
-      { status: "APPROVED", reviewedBy: APPROVER_ID, comments: "Approved." },
+      { status: "APPROVED", reviewedBy: REVIEWER_ID, comments: "Approved." },
     )
   ).templateId;
 
@@ -76,11 +87,37 @@ beforeAll(async () => {
     )
   ).templateId;
 
+  // Approved template whose last step really produces a file during execution.
+  docOutputDir = await fs.mkdtemp(path.join(os.tmpdir(), "template-docs-"));
+  documentTemplateId = (
+    await templates.create(
+      {
+        name: "Complaint Letter Workflow",
+        version: 1,
+        steps: [
+          ...steps(),
+          {
+            id: "step-5",
+            name: "Generate Complaint Letter",
+            type: "document" as const,
+            description: "Produce the reply letter from the case details.",
+          },
+        ],
+        origin: "MANUAL",
+        isActive: true,
+        createdBy: OPERATOR_ID,
+      },
+      { status: "APPROVED", reviewedBy: REVIEWER_ID, comments: "Approved." },
+    )
+  ).templateId;
+
   app = createApp({
     repo: templates,
     executions,
     checkpointer,
     notifier,
+    documents: new HtmlFileDocumentGenerator(docOutputDir),
+    documentOutputDir: docOutputDir,
     operators: testOperatorDirectory(),
     generator: { generate: async () => ({ name: "unused", steps: steps() }) },
     rules,
@@ -95,6 +132,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (docOutputDir) await fs.rm(docOutputDir, { recursive: true, force: true });
 });
 
 async function api(
@@ -136,11 +174,20 @@ describe("POST /api/instances (starting execution)", () => {
     const response = await start();
     expect(response.status).toBe(201);
 
-    const { instance, stepRuns } = response.body;
+    const { instance, stepRuns, pendingApproval } = response.body;
     expect(instance.status).toBe("PAUSED");
     expect(instance.currentStep).toBe("step-3");
     expect(instance.cursorIndex).toBe(2);
     expect(instance.templateName).toBe("Maintenance Complaint Workflow");
+
+    // The gate payload a dashboard renders while the run waits for a human.
+    expect(pendingApproval).toMatchObject({
+      kind: "approval",
+      instanceId: instance.instanceId,
+      stepNumber: 3,
+      totalSteps: 4,
+      step: { id: "step-3", type: "approval" },
+    });
 
     expect(stepRuns.map((run: any) => `${run.stepId}:${run.status}`)).toEqual([
       "step-1:COMPLETED",
@@ -157,12 +204,12 @@ describe("POST /api/instances (starting execution)", () => {
 });
 
 describe("POST /api/instances/:id/respond (the approval gate)", () => {
-  it("forbids a non-approver from answering the gate", async () => {
+  it("forbids an auditor from answering the gate", async () => {
     const { body } = await start();
     const response = await api(`/api/instances/${body.instance.instanceId}/respond`, {
       method: "POST",
       body: { approved: true },
-      operator: OPERATOR_ID,
+      operator: AUDITOR_ID,
     });
     expect(response.status).toBe(403);
   });
@@ -174,14 +221,14 @@ describe("POST /api/instances/:id/respond (the approval gate)", () => {
     const response = await api(`/api/instances/${instanceId}/respond`, {
       method: "POST",
       body: { approved: false, comments: "Missing escalation step." },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(response.status).toBe(200);
     expect(response.body.instance.status).toBe("REJECTED");
 
     const approvalRun = response.body.stepRuns.find((run: any) => run.stepId === "step-3");
     expect(approvalRun.status).toBe("REJECTED");
-    expect(approvalRun.performedBy).toBe(APPROVER_ID);
+    expect(approvalRun.performedBy).toBe(REVIEWER_ID);
     expect(notifier.sent).toHaveLength(0);
   });
 
@@ -192,7 +239,7 @@ describe("POST /api/instances/:id/respond (the approval gate)", () => {
     const response = await api(`/api/instances/${instanceId}/respond`, {
       method: "POST",
       body: { approved: true, comments: "Looks good." },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(response.status).toBe(200);
     expect(response.body.instance.status).toBe("COMPLETED");
@@ -205,7 +252,7 @@ describe("POST /api/instances/:id/respond (the approval gate)", () => {
       "step-3:APPROVED",
       "step-4:SIMULATED",
     ]);
-    expect(response.body.stepRuns[2].performedBy).toBe(APPROVER_ID);
+    expect(response.body.stepRuns[2].performedBy).toBe(REVIEWER_ID);
 
     // Exactly one notification, and it is simulated rather than delivered.
     expect(notifier.sent).toHaveLength(1);
@@ -214,7 +261,7 @@ describe("POST /api/instances/:id/respond (the approval gate)", () => {
     const twice = await api(`/api/instances/${instanceId}/respond`, {
       method: "POST",
       body: { approved: true },
-      operator: APPROVER_ID,
+      operator: REVIEWER_ID,
     });
     expect(twice.status).toBe(409);
     expect(twice.body.error.details.instanceStatus).toBe("COMPLETED");
@@ -256,6 +303,63 @@ describe("cancelling and listing", () => {
   });
 });
 
+describe("document generation during execution", () => {
+  it("produces a real file from the supplied input after approval", async () => {
+    const input = {
+      complainant: "Nurul Aisyah",
+      location: "Block C, Level 2",
+      issue: "Air cond leaking",
+    };
+    const started = await api("/api/instances", {
+      method: "POST",
+      body: { templateId: documentTemplateId, input },
+    });
+    expect(started.status).toBe(201);
+    expect(started.body.instance.status).toBe("PAUSED");
+    expect(started.body.instance.input).toEqual(input);
+
+    const instanceId: string = started.body.instance.instanceId;
+    const finished = await api(`/api/instances/${instanceId}/respond`, {
+      method: "POST",
+      body: { approved: true, comments: "Send the letter." },
+      operator: REVIEWER_ID,
+    });
+    expect(finished.status).toBe(200);
+    expect(finished.body.instance.status).toBe("COMPLETED");
+
+    const docRun = finished.body.stepRuns.find((run: any) => run.stepId === "step-5");
+    expect(docRun.status).toBe("COMPLETED");
+    expect(docRun.result.mode).toBe("generated");
+    expect(docRun.result.file).toContain("step-5.html");
+
+    // The file is real, on disk, and built from the input we supplied.
+    const html = await fs.readFile(docRun.result.file, "utf8");
+    expect(html).toContain("Complaint Letter Workflow");
+    expect(html).toContain("Nurul Aisyah");
+    expect(html).toContain("Air cond leaking");
+
+    // …and it is served back through the API for the run's document step.
+    const served = await fetch(`${base}/api/instances/${instanceId}/documents/step-5`, {
+      headers: { "x-operator-id": OPERATOR_ID },
+    });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toContain("text/html");
+    expect(await served.text()).toContain("Nurul Aisyah");
+
+    // Only real document steps resolve; other steps and unknown ids are 404s.
+    expect((await api(`/api/instances/${instanceId}/documents/step-1`)).status).toBe(404);
+    expect((await api(`/api/instances/${instanceId}/documents/nope`)).status).toBe(404);
+  });
+
+  it("rejects oversized or non-string input at the API boundary", async () => {
+    const bad = await api("/api/instances", {
+      method: "POST",
+      body: { templateId: documentTemplateId, input: { note: 42 } },
+    });
+    expect(bad.status).toBe(422);
+  });
+});
+
 describe("checkpoint persistence", () => {
   it("resumes a paused workflow from a second service instance sharing the checkpointer", async () => {
     const { body } = await start();
@@ -267,6 +371,8 @@ describe("checkpoint persistence", () => {
       instances: executions,
       checkpointer,
       notifier,
+      documents: new HtmlFileDocumentGenerator(docOutputDir),
+      documentOutputDir: docOutputDir,
     });
 
     const notificationsBefore = notifier.sent.length;
@@ -274,7 +380,7 @@ describe("checkpoint persistence", () => {
     const detail = await restarted.respond(instanceId, {
       approved: true,
       comments: "Approved after restart.",
-      by: APPROVER_ID,
+      by: REVIEWER_ID,
     });
 
     expect(detail.instance.status).toBe("COMPLETED");

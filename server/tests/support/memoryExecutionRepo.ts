@@ -28,6 +28,7 @@ export class MemoryExecutionRepository implements ExecutionRepository {
       status: record.status,
       currentStep: record.currentStep,
       cursorIndex: record.cursorIndex,
+      input: clone(record.input ?? {}),
       createdBy: record.createdBy,
       createdAt: now(),
       updatedAt: now(),

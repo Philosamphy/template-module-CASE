@@ -6,7 +6,10 @@ import { ActiveBadge, ErrorBox, OriginBadge, StatusBadge } from "./ui";
 
 interface Props {
   template: Template;
-  isApprover: boolean;
+  /** template:edit / template:approve / template:deactivate, from /api/operators/me. */
+  canEdit: boolean;
+  canApprove: boolean;
+  canDeactivate: boolean;
   onUpdated: (template: Template) => void;
   onDeactivated: (template: Template) => void;
   onBack: () => void;
@@ -16,12 +19,15 @@ const STEP_TYPE_STYLES: Record<string, string> = {
   review: "border-sky-200 bg-sky-50 text-sky-700",
   validation: "border-amber-200 bg-amber-50 text-amber-700",
   approval: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  document: "border-rose-200 bg-rose-50 text-rose-700",
   notification: "border-violet-200 bg-violet-50 text-violet-700",
 };
 
 export default function TemplateDetail({
   template,
-  isApprover,
+  canEdit,
+  canApprove,
+  canDeactivate,
   onUpdated,
   onDeactivated,
   onBack,
@@ -33,7 +39,8 @@ export default function TemplateDetail({
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
-  const canEdit = template.reviewStatus !== "APPROVED";
+  // Approved templates are locked for everyone — a change needs a new version.
+  const editable = canEdit && template.reviewStatus !== "APPROVED";
 
   const run = async (action: () => Promise<Template>) => {
     setBusy(true);
@@ -124,9 +131,9 @@ export default function TemplateDetail({
 
       <ErrorBox error={error} />
 
-      {/* Review decision panel — only rendered for approvers looking at a PENDING template.
-          The server enforces the same rule independently. */}
-      {template.reviewStatus === "PENDING" && isApprover && (
+      {/* Review decision panel — only rendered for template:approve holders looking at
+          a PENDING template. The server enforces the same rule independently. */}
+      {template.reviewStatus === "PENDING" && canApprove && (
         <section className="rounded-xl border border-amber-200 bg-amber-50 p-5">
           <h3 className="text-sm font-semibold text-amber-900">Review decision</h3>
           <p className="mt-1 text-sm text-amber-800">
@@ -163,7 +170,7 @@ export default function TemplateDetail({
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-700">Steps ({template.steps.length})</h3>
-          {canEdit && !editing && (
+          {editable && !editing && (
             <button
               type="button"
               onClick={startEdit}
@@ -229,9 +236,11 @@ export default function TemplateDetail({
           </ol>
         )}
 
-        {!canEdit && !editing && (
+        {!editable && !editing && (
           <p className="mt-3 text-xs text-slate-500">
-            Approved templates are locked. Create a new version if changes are needed.
+            {template.reviewStatus === "APPROVED"
+              ? "Approved templates are locked. Create a new version if changes are needed."
+              : "Your role can view this template but not edit it."}
           </p>
         )}
       </section>
@@ -255,7 +264,7 @@ export default function TemplateDetail({
         </ul>
       </section>
 
-      {template.isActive && (
+      {template.isActive && canDeactivate && (
         <button
           type="button"
           disabled={busy}
